@@ -12,7 +12,4 @@ Pod::Spec.new do |s|
   s.source_files  = "AmazonFreeRTOS/**/*.{swift,m,h}"
   s.requires_arc  = true
   s.frameworks    = "CoreBluetooth"
-  s.dependency "AWSMobileClient"
-  s.dependency "AWSIoT"
-  s.dependency "CBORSwift"
 end

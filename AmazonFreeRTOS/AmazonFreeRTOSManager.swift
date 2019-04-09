@@ -1,6 +1,3 @@
-import AWSIoT
-import AWSMobileClient
-import CBORSwift
 import CoreBluetooth
 import os.log
 
@@ -14,17 +11,13 @@ public class AmazonFreeRTOSManager: NSObject {
     /// Service UUIDs in the Advertising Packets.
     public var advertisingServiceUUIDs: [CBUUID] = [AmazonFreeRTOSGattService.DeviceInfo]
     /// Service UUIDs.
-    public var serviceUUIDs: [CBUUID] = [AmazonFreeRTOSGattService.DeviceInfo, AmazonFreeRTOSGattService.MqttProxy, AmazonFreeRTOSGattService.NetworkConfig]
+    public var serviceUUIDs: [CBUUID] = [AmazonFreeRTOSGattService.DeviceInfo, AmazonFreeRTOSGattService.NetworkConfig]
 
     /// Shared instence of Amazon FreeRTOS Manager.
     public static let shared = AmazonFreeRTOSManager()
 
     // BLE Central Manager for the SDK.
     private var central: CBCentralManager?
-    // used for large object transfer with peripheral identifier and characteristic uuid as keys, read from device.
-    private var txLotDatas: [String: Data] = [:]
-    // used for large object transfer with peripheral identifier and characteristic uuid as keys, write to device queue.
-    private var rxLotDataQueues: [String: [Data]] = [:]
 
     /// The peripherals using peripheral identifier as key.
     public var peripherals: [String: CBPeripheral] = [:]
@@ -85,8 +78,6 @@ extension AmazonFreeRTOSManager {
         reconnectPeripherals.removeAll()
         mtus.removeAll()
         networks.removeAll()
-        txLotDatas.removeAll()
-        rxLotDataQueues.removeAll()
 
         startScanForPeripherals()
     }
@@ -172,46 +163,6 @@ extension AmazonFreeRTOSManager {
             return
         }
         peripheral.readValue(for: characteristic)
-    }
-
-    // Mqtt Proxy Service
-
-    /**
-     Get the mqtt proxy control state of the `peripheral`.
-
-     - Parameter peripheral: The FreeRTOS peripheral.
-     */
-    public func getMqttProxyControlOfPeripheral(_ peripheral: CBPeripheral) {
-
-        debugPrint("↓ get control")
-
-        guard let characteristic = peripheral.serviceOf(uuid: AmazonFreeRTOSGattService.MqttProxy)?.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.Control) else {
-            debugPrint("Error (getMqttProxyControlOfPeripheral): MqttProxy service or Control characteristic doesn't exist")
-            return
-        }
-        peripheral.readValue(for: characteristic)
-    }
-
-    /**
-     Update the mqtt proxy control of the `peripheral` to start and stop the proxy.
-
-     - Parameters:
-        - peripheral: The FreeRTOS peripheral.
-        - mqttProxyControl: The mqtt proxy control.
-     */
-    public func updateMqttProxyControlOfPeripheral(_ peripheral: CBPeripheral, mqttProxyControl: MqttProxyControl) {
-
-        debugPrint("↓ \(mqttProxyControl)")
-
-        guard let data = encode(mqttProxyControl) else {
-            debugPrint("Error (updateMqttProxyControlOfPeripheral): Invalid MqttProxyControl")
-            return
-        }
-        guard let characteristic = peripheral.serviceOf(uuid: AmazonFreeRTOSGattService.MqttProxy)?.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.Control) else {
-            debugPrint("Error (updateMqttProxyControlOfPeripheral): MqttProxy service or Control characteristic doesn't exist")
-            return
-        }
-        peripheral.writeValue(data, for: characteristic, type: .withResponse)
     }
 
     // Network Config Service
@@ -352,10 +303,6 @@ extension AmazonFreeRTOSManager: CBCentralManagerDelegate {
             debugPrint("Error (central_didDisconnectPeripheral): \(error.localizedDescription)")
         }
         networks.removeValue(forKey: peripheral.identifier.uuidString)
-        AWSIoTDataManager(forKey: peripheral.identifier.uuidString).disconnect()
-        rxLotDataQueues = rxLotDataQueues.filter { key, _ -> Bool in
-            !key.contains(peripheral.identifier.uuidString)
-        }
         NotificationCenter.default.post(name: .afrCentralManagerDidDisconnectPeripheral, object: nil, userInfo: ["peripheral": peripheral.identifier])
         if let peripheral = reconnectPeripherals[peripheral.identifier.uuidString] {
             central.connect(peripheral, options: nil)
@@ -423,17 +370,6 @@ extension AmazonFreeRTOSManager: CBPeripheralDelegate {
         case AmazonFreeRTOSGattCharacteristic.Mtu:
             didUpdateValueForMtu(peripheral: peripheral, characteristic: characteristic)
 
-            // Mqtt Proxy Service
-
-        case AmazonFreeRTOSGattCharacteristic.Control:
-            didUpdateValueForControl(peripheral: peripheral, characteristic: characteristic)
-
-        case AmazonFreeRTOSGattCharacteristic.TXMessage:
-            didUpdateValueForTXMessage(peripheral: peripheral, characteristic: characteristic, data: nil)
-
-        case AmazonFreeRTOSGattCharacteristic.TXLargeMessage:
-            didUpdateValueForTXLargeMessage(peripheral: peripheral, characteristic: characteristic)
-
             // Network Config Service
 
         case AmazonFreeRTOSGattCharacteristic.ListNetwork:
@@ -461,15 +397,6 @@ extension AmazonFreeRTOSManager: CBPeripheralDelegate {
 
         if let error = error {
             debugPrint("Error (peripheral_didWriteValueForCharacteristic): \(error.localizedDescription)")
-            return
-        }
-
-        switch characteristic.uuid {
-
-        case AmazonFreeRTOSGattCharacteristic.RXLargeMessage:
-            writeValueToRXLargeMessage(peripheral: peripheral, characteristic: characteristic)
-
-        default:
             return
         }
     }
@@ -530,362 +457,6 @@ extension AmazonFreeRTOSManager {
         mtus[peripheral.identifier.uuidString] = mtu
         debugPrint("→ \(mtu)")
         NotificationCenter.default.post(name: .afrDeviceInfoMtu, object: nil, userInfo: ["mtu": mtu])
-    }
-
-    // Mqtt Proxy Service
-
-    /**
-     Process data of Control characteristic from `peripheral`.
-
-     - Parameters:
-        - peripheral: The FreeRTOS peripheral.
-        - characteristic: The control characteristic.
-     */
-    public func didUpdateValueForControl(peripheral _: CBPeripheral, characteristic: CBCharacteristic) {
-
-        guard let value = characteristic.value, let control = decode(MqttProxyControl.self, from: value) else {
-            debugPrint("Error (didUpdateValueForControl): Invalid MqttProxyControl")
-            return
-        }
-        debugPrint("→ \(control)")
-        NotificationCenter.default.post(name: .afrMqttProxyControl, object: nil, userInfo: ["control": control])
-    }
-
-    /**
-     Process data of TXMessage characteristic from `peripheral`.
-
-     - Parameters:
-        - peripheral: The FreeRTOS peripheral.
-        - characteristic: The TXMessage characteristic.
-     */
-    public func didUpdateValueForTXMessage(peripheral: CBPeripheral, characteristic: CBCharacteristic, data: Data?) {
-
-        guard let value = data ?? characteristic.value, let mqttProxyMessage = decode(MqttProxyMessage.self, from: value) else {
-            debugPrint("Error (didUpdateValueForTXMessage): Invalid MqttProxy Message")
-            return
-        }
-
-        switch mqttProxyMessage.type {
-
-        case .connect:
-
-            guard let connect = decode(Connect.self, from: value) else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Connect")
-                return
-            }
-
-            debugPrint("↑ \(connect)")
-
-            guard let region = connect.brokerEndpoint.split(separator: ".").object(at: 2) else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Connect - broker endpoint region")
-                return
-            }
-
-            guard let serviceConfiguration = AWSServiceConfiguration(region: String(region).aws_regionTypeValue(), endpoint: AWSEndpoint(urlString: "https://\(connect.brokerEndpoint)"), credentialsProvider: AWSMobileClient.sharedInstance()) else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Connect - serviceConfiguration")
-                return
-            }
-
-            AWSIoTDataManager.register(with: serviceConfiguration, forKey: peripheral.identifier.uuidString)
-            AWSIoTDataManager(forKey: peripheral.identifier.uuidString).disconnect()
-            AWSIoTDataManager(forKey: peripheral.identifier.uuidString).connectUsingWebSocket(withClientId: "\(connect.clientID)_\(Int.random(in: 1 ..< 1_000_000))", cleanSession: connect.cleanSession) { status in
-
-                switch status {
-
-                case .connected:
-
-                    let connack = Connack(type: .connack, status: status.rawValue)
-
-                    self.debugPrint("↓ \(connack)")
-
-                    guard let data = self.encode(connack) else {
-                        self.debugPrint("Error (writeValueForCharacteristic): Invalid Connack")
-                        return
-                    }
-                    DispatchQueue.main.async {
-                        guard peripheral.state == .connected else {
-                            self.debugPrint("Error (writeValueForCharacteristic): Invalid Connack - peripheral no longer connected")
-                            return
-                        }
-                        guard let characteristic = characteristic.service.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.RXMessage) else {
-                            self.debugPrint("Error (writeValueForCharacteristic): Invalid Connack - RXMessage characteristic doesn't exist")
-                            return
-                        }
-                        peripheral.writeValue(data, for: characteristic, type: .withResponse)
-                    }
-
-                default:
-                    return
-                }
-            }
-
-        case .publish:
-
-            guard let publish = decode(Publish.self, from: value) else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Publish")
-                return
-            }
-
-            debugPrint("↑ \(publish)")
-
-            guard let qoS = AWSIoTMQTTQoS(rawValue: publish.qoS) else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Publish - qos")
-                return
-            }
-
-            guard AWSIoTDataManager(forKey: peripheral.identifier.uuidString).getConnectionStatus() == .connected else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Publish - AWSIoTDataManager not connected")
-                return
-            }
-
-            if qoS == AWSIoTMQTTQoS.messageDeliveryAttemptedAtMostOnce {
-                AWSIoTDataManager(forKey: peripheral.identifier.uuidString).publishData(publish.payload, onTopic: publish.topic, qoS: qoS)
-                return
-            }
-            AWSIoTDataManager(forKey: peripheral.identifier.uuidString).publishData(publish.payload, onTopic: publish.topic, qoS: qoS) {
-
-                let puback = Puback(type: .puback, msgID: publish.msgID)
-
-                self.debugPrint("↓ \(puback)")
-
-                guard let data = self.encode(puback) else {
-                    self.debugPrint("Error (writeValueForCharacteristic): Invalid Puback")
-                    return
-                }
-                DispatchQueue.main.async {
-                    guard peripheral.state == .connected else {
-                        self.debugPrint("Error (writeValueForCharacteristic): Invalid Puback - peripheral no longer connected")
-                        return
-                    }
-                    guard let characteristic = characteristic.service.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.RXMessage) else {
-                        self.debugPrint("Error (writeValueForCharacteristic): Invalid Puback - RXMessage characteristic doesn't exist")
-                        return
-                    }
-                    peripheral.writeValue(data, for: characteristic, type: .withResponse)
-                }
-            }
-
-        case .puback:
-            // need aws iot sdk change, current it auto send puback when recived at sdk side.
-            return
-
-        case .subscribe:
-
-            guard let subscribe = decode(Subscribe.self, from: value) else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Subscribe")
-                return
-            }
-
-            debugPrint("↑ \(subscribe)")
-
-            guard subscribe.topics.count == subscribe.qoSs.count else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Subscribe - topics and qoSs not match")
-                return
-            }
-
-            for (index, topic) in subscribe.topics.enumerated() {
-
-                guard let qoS = AWSIoTMQTTQoS(rawValue: subscribe.qoSs[index]) else {
-                    debugPrint("Error (didUpdateValueForTXMessage): Invalid Subscribe - qos")
-                    return
-                }
-
-                guard AWSIoTDataManager(forKey: peripheral.identifier.uuidString).getConnectionStatus() == .connected else {
-                    debugPrint("Error (didUpdateValueForTXMessage): Invalid Subscribe - AWSIoTDataManager not connected")
-                    return
-                }
-
-                AWSIoTDataManager(forKey: peripheral.identifier.uuidString).subscribe(toTopic: topic, qoS: qoS, messageCallback: { data in
-
-                    let publish = Publish(type: .publish, topic: topic, msgID: subscribe.msgID, qoS: qoS.rawValue, payload: data)
-
-                    self.debugPrint("↓ \(publish)")
-
-                    guard let data = self.encode(publish) else {
-                        self.debugPrint("Error (writeValueForCharacteristic): Invalid Publish")
-                        return
-                    }
-                    DispatchQueue.main.async {
-                        guard peripheral.state == .connected else {
-                            self.debugPrint("Error (writeValueForCharacteristic): Invalid Publish - peripheral no longer connected")
-                            return
-                        }
-                        guard let characteristic = characteristic.service.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.RXMessage) else {
-                            self.debugPrint("Error (writeValueForCharacteristic): Invalid Publish - RXMessage characteristic doesn't exist")
-                            return
-                        }
-
-                        guard let mtu = self.mtus[peripheral.identifier.uuidString] else {
-                            self.debugPrint("Error (writeValueForCharacteristic): Invalid Connack - Mtu Unknown")
-                            return
-                        }
-                        if data.count > mtu - 3 {
-                            guard let characteristic = characteristic.service.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.RXLargeMessage) else {
-                                self.debugPrint("Error (writeValueForCharacteristic): RXLargeMessage characteristic doesn't exist")
-                                return
-                            }
-
-                            // prepare rxLot
-
-                            if self.rxLotDataQueues[peripheral.identifier.uuidString + characteristic.uuid.uuidString] == nil {
-                                self.rxLotDataQueues[peripheral.identifier.uuidString + characteristic.uuid.uuidString] = [data]
-                            } else {
-                                self.rxLotDataQueues[peripheral.identifier.uuidString + characteristic.uuid.uuidString]?.append(data)
-                            }
-
-                            if self.rxLotDataQueues[peripheral.identifier.uuidString + characteristic.uuid.uuidString]?.count == 1 {
-                                self.writeValueToRXLargeMessage(peripheral: peripheral, characteristic: characteristic)
-                            }
-                            return
-                        }
-                        peripheral.writeValue(data, for: characteristic, type: .withResponse)
-                    }
-
-                }, ackCallback: {
-
-                    let suback = Suback(type: .suback, msgID: subscribe.msgID, status: subscribe.qoSs[index])
-
-                    self.debugPrint("↓ \(suback)")
-
-                    guard let data = self.encode(suback) else {
-                        self.debugPrint("Error (writeValueForCharacteristic): Invalid Suback")
-                        return
-                    }
-                    DispatchQueue.main.async {
-                        guard peripheral.state == .connected else {
-                            self.debugPrint("Error (writeValueForCharacteristic): Invalid Suback - peripheral no longer connected")
-                            return
-                        }
-                        guard let characteristic = characteristic.service.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.RXMessage) else {
-                            self.debugPrint("Error (writeValueForCharacteristic): Invalid Suback - RXMessage characteristic doesn't exist")
-                            return
-                        }
-                        peripheral.writeValue(data, for: characteristic, type: .withResponse)
-                    }
-                })
-            }
-
-        case .unsubscribe:
-
-            guard let unsubscribe = decode(Unsubscribe.self, from: value) else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Unsubscribe")
-                return
-            }
-
-            debugPrint("↑ \(unsubscribe)")
-
-            for topic in unsubscribe.topics {
-
-                guard AWSIoTDataManager(forKey: peripheral.identifier.uuidString).getConnectionStatus() == .connected else {
-                    debugPrint("Error (didUpdateValueForTXMessage): Invalid Unsubscribe - AWSIoTDataManager not connected")
-                    return
-                }
-
-                AWSIoTDataManager(forKey: peripheral.identifier.uuidString).unsubscribeTopic(topic)
-
-                let unsuback = Unsuback(type: .unsuback, msgID: unsubscribe.msgID)
-
-                debugPrint("↓ \(unsuback)")
-
-                guard let data = self.encode(unsuback) else {
-                    debugPrint("Error (writeValueForCharacteristic): Invalid Unsuback")
-                    return
-                }
-
-                guard peripheral.state == .connected else {
-                    debugPrint("Error (writeValueForCharacteristic): Invalid Suback - peripheral no longer connected")
-                    return
-                }
-                guard let characteristic = characteristic.service.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.RXMessage) else {
-                    debugPrint("Error (writeValueForCharacteristic): Invalid Unsuback - characteristic doesn't exist ")
-                    return
-                }
-                peripheral.writeValue(data, for: characteristic, type: .withResponse)
-            }
-
-        case .disconnnect:
-
-            guard let disconnect = decode(Disconnect.self, from: value) else {
-                debugPrint("Error (didUpdateValueForTXMessage): Invalid Disconnect")
-                return
-            }
-
-            debugPrint("↑ \(disconnect)")
-
-            AWSIoTDataManager(forKey: peripheral.identifier.uuidString).disconnect()
-            rxLotDataQueues = rxLotDataQueues.filter { key, _ -> Bool in
-                !key.contains(peripheral.identifier.uuidString)
-            }
-
-        default:
-            debugPrint("Error (didUpdateValueForTXMessage): Unsupported Mqtt Proxy Message Type")
-        }
-    }
-
-    /**
-     Process data of TXLargeMessage characteristic from `peripheral`. Used by large object transfer.
-
-     - Parameters:
-        - peripheral: The FreeRTOS peripheral.
-        - characteristic: The TXMessage characteristic.
-     */
-    public func didUpdateValueForTXLargeMessage(peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        guard let mtu = mtus[peripheral.identifier.uuidString] else {
-            debugPrint("Error (didUpdateValueForTXLargeMessage): Mtu Unknown")
-            return
-        }
-
-        if let txLotData = txLotDatas[peripheral.identifier.uuidString + characteristic.uuid.uuidString], let value = characteristic.value {
-            let data = Data([UInt8](txLotData) + [UInt8](value))
-            txLotDatas[peripheral.identifier.uuidString + characteristic.uuid.uuidString] = data
-            debugPrint("↑ Large Object Transfer - \(data)")
-        } else if let value = characteristic.value {
-            txLotDatas[peripheral.identifier.uuidString + characteristic.uuid.uuidString] = value
-            debugPrint("↑ Large Object Transfer - \(value)")
-        }
-        if characteristic.value?.count ?? 0 < mtu - 3 {
-            if let txLotData = txLotDatas[peripheral.identifier.uuidString + characteristic.uuid.uuidString] {
-                guard let characteristic = characteristic.service.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.TXMessage) else {
-                    debugPrint("Error (didUpdateValueForTXLargeMessage): TXMessage characteristic doesn't exist")
-                    return
-                }
-                didUpdateValueForTXMessage(peripheral: peripheral, characteristic: characteristic, data: txLotData)
-                debugPrint("↑ Large Object Transfer - \(txLotData)")
-            }
-            txLotDatas[peripheral.identifier.uuidString + characteristic.uuid.uuidString] = nil
-        } else {
-            guard let characteristic = characteristic.service.characteristicOf(uuid: AmazonFreeRTOSGattCharacteristic.TXLargeMessage) else {
-                debugPrint("Error (didUpdateValueForTXLargeMessage): TXLargeMessage characteristic doesn't exist")
-                return
-            }
-            peripheral.readValue(for: characteristic)
-        }
-    }
-
-    /**
-     Write data to RXLargeMessage characteristic of `peripheral`. Used by large object transfer.
-
-     - Parameters:
-        - peripheral: The FreeRTOS peripheral.
-        - characteristic: The RXLargeMessage characteristic.
-     */
-    public func writeValueToRXLargeMessage(peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        guard let mtu = mtus[peripheral.identifier.uuidString] else {
-            debugPrint("Error (writeValueForRXLargeMessage): Mtu Unknown")
-            return
-        }
-        guard let rxLotData = rxLotDataQueues[peripheral.identifier.uuidString + characteristic.uuid.uuidString]?.first else {
-            return
-        }
-        let data = Data([UInt8](rxLotData).prefix(mtu - 3))
-        if data.count < mtu - 3 {
-            rxLotDataQueues[peripheral.identifier.uuidString + characteristic.uuid.uuidString]?.removeFirst()
-            debugPrint("↓ Large Object Transfer - \(data) - \(rxLotDataQueues[peripheral.identifier.uuidString + characteristic.uuid.uuidString]?.count ?? 0) in queue")
-        } else {
-            rxLotDataQueues[peripheral.identifier.uuidString + characteristic.uuid.uuidString]?[0] = Data([UInt8](rxLotData).dropFirst(mtu - 3))
-            debugPrint("↓ Large Object Transfer - \(rxLotData) - \(rxLotDataQueues[peripheral.identifier.uuidString + characteristic.uuid.uuidString]?.count ?? 0) in queue")
-        }
-        peripheral.writeValue(data, for: characteristic, type: .withResponse)
     }
 
     // Network Config Service

@@ -30,11 +30,6 @@ extension NSNotification.Name {
     /// Amazon FreeRTOS return device info mtu.
     public static let afrDeviceInfoMtu: NSNotification.Name = NSNotification.Name("afrDeviceInfoMtu")
 
-    // MqttProxy
-
-    /// Amazon FreeRTOS return mqtt proxy control.
-    public static let afrMqttProxyControl: NSNotification.Name = NSNotification.Name("afrMqttProxyControl")
-
     // NetworkConfig
 
     /// Amazon FreeRTOS list network returned a saved or scaned network.
